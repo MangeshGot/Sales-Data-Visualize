@@ -4,6 +4,7 @@ import numpy as np
 import plotly.express as px
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
+import io
 
 # Page configuration
 st.set_page_config(
@@ -47,12 +48,102 @@ def generate_sample_data():
     
     return pd.DataFrame(data)
 
-# Load data
-df = generate_sample_data()
+def validate_and_prepare_data(df):
+    """Validate and prepare uploaded data"""
+    required_columns = {'Date', 'Category', 'Region', 'Sales', 'Units', 'Customers'}
+    
+    # Check if all required columns exist
+    missing_columns = required_columns - set(df.columns)
+    if missing_columns:
+        st.error(f"Missing required columns: {', '.join(missing_columns)}")
+        st.info("Required columns: Date, Category, Region, Sales, Units, Customers")
+        return None
+    
+    # Try to convert Date column to datetime
+    try:
+        df['Date'] = pd.to_datetime(df['Date'])
+    except Exception as e:
+        st.error(f"Error converting 'Date' column to datetime: {e}")
+        return None
+    
+    # Ensure numeric columns are numeric
+    numeric_columns = ['Sales', 'Units', 'Customers']
+    for col in numeric_columns:
+        try:
+            df[col] = pd.to_numeric(df[col], errors='coerce')
+        except Exception as e:
+            st.error(f"Error converting '{col}' to numeric: {e}")
+            return None
+    
+    # Drop rows with missing values
+    df = df.dropna()
+    
+    if len(df) == 0:
+        st.error("No valid data remaining after cleaning")
+        return None
+    
+    return df
+
+def load_uploaded_file(uploaded_file):
+    """Load data from uploaded CSV or Excel file"""
+    try:
+        if uploaded_file.name.endswith('.csv'):
+            df = pd.read_csv(uploaded_file)
+        elif uploaded_file.name.endswith(('.xlsx', '.xls')):
+            df = pd.read_excel(uploaded_file)
+        else:
+            st.error("Unsupported file format. Please upload CSV or Excel file.")
+            return None
+        
+        return validate_and_prepare_data(df)
+    
+    except Exception as e:
+        st.error(f"Error loading file: {e}")
+        return None
 
 # Header
 st.title("📊 Sales Dashboard")
 st.markdown("### Interactive data visualization and analytics")
+
+# Sidebar - Data Source Selection
+st.sidebar.header("Data Source")
+
+data_source = st.sidebar.radio(
+    "Choose data source:",
+    ["Sample Data", "Upload File"],
+    help="Use sample data or upload your own CSV/Excel file"
+)
+
+df = None
+
+if data_source == "Sample Data":
+    df = generate_sample_data()
+    st.sidebar.success("Using sample sales data")
+else:
+    st.sidebar.markdown("Upload a CSV or Excel file with columns:")
+    st.sidebar.code("Date, Category, Region, Sales, Units, Customers")
+    
+    uploaded_file = st.sidebar.file_uploader(
+        "Choose a file",
+        type=['csv', 'xlsx', 'xls'],
+        help="Upload CSV or Excel file"
+    )
+    
+    if uploaded_file is not None:
+        df = load_uploaded_file(uploaded_file)
+        if df is not None:
+            st.sidebar.success(f"Loaded {len(df)} rows from {uploaded_file.name}")
+    else:
+        st.info("Please upload a file to continue")
+        st.stop()
+
+# If no valid data, stop
+if df is None or len(df) == 0:
+    st.warning("No data available. Please check your file or use sample data.")
+    st.stop()
+
+# Store in session state for other pages
+st.session_state.df = df
 
 # Sidebar filters
 st.sidebar.header("Filters")
@@ -69,17 +160,19 @@ date_range = st.sidebar.date_input(
 )
 
 # Category filter
+available_categories = sorted(df['Category'].unique())
 categories = st.sidebar.multiselect(
     "Categories",
-    options=df['Category'].unique(),
-    default=df['Category'].unique()
+    options=available_categories,
+    default=available_categories
 )
 
 # Region filter
+available_regions = sorted(df['Region'].unique())
 regions = st.sidebar.multiselect(
     "Regions",
-    options=df['Region'].unique(),
-    default=df['Region'].unique()
+    options=available_regions,
+    default=available_regions
 )
 
 # Filter data based on selections
@@ -97,6 +190,105 @@ if categories:
 
 if regions:
     filtered_df = filtered_df[filtered_df['Region'].isin(regions)]
+
+# Check if filtered data is empty
+if len(filtered_df) == 0:
+    st.warning("No data matches the selected filters. Please adjust your filters.")
+    st.stop()
+
+# Store filtered data in session state for other pages
+st.session_state.filtered_df = filtered_df
+
+# Export Options in Sidebar
+st.sidebar.markdown("---")
+st.sidebar.header("Export Options")
+
+# Create summary report for export
+def create_summary_report(df, filtered_df):
+    """Create a comprehensive Excel report with multiple sheets"""
+    output = io.BytesIO()
+    
+    with pd.ExcelWriter(output, engine='openpyxl') as writer:
+        # Sheet 1: Summary Statistics
+        summary_data = {
+            'Metric': [
+                'Total Sales',
+                'Total Units',
+                'Total Customers',
+                'Average Sale',
+                'Number of Transactions',
+                'Date Range Start',
+                'Date Range End',
+                'Number of Categories',
+                'Number of Regions'
+            ],
+            'Value': [
+                f"${filtered_df['Sales'].sum():,.2f}",
+                f"{filtered_df['Units'].sum():,}",
+                f"{filtered_df['Customers'].sum():,}",
+                f"${filtered_df['Sales'].mean():,.2f}",
+                f"{len(filtered_df):,}",
+                str(filtered_df['Date'].min().date()),
+                str(filtered_df['Date'].max().date()),
+                filtered_df['Category'].nunique(),
+                filtered_df['Region'].nunique()
+            ]
+        }
+        summary_df = pd.DataFrame(summary_data)
+        summary_df.to_excel(writer, sheet_name='Summary', index=False)
+        
+        # Sheet 2: Sales by Category
+        category_sales = filtered_df.groupby('Category').agg({
+            'Sales': 'sum',
+            'Units': 'sum',
+            'Customers': 'sum'
+        }).reset_index()
+        category_sales.columns = ['Category', 'Total Sales', 'Total Units', 'Total Customers']
+        category_sales = category_sales.sort_values('Total Sales', ascending=False)
+        category_sales.to_excel(writer, sheet_name='By Category', index=False)
+        
+        # Sheet 3: Sales by Region
+        region_sales = filtered_df.groupby('Region').agg({
+            'Sales': 'sum',
+            'Units': 'sum',
+            'Customers': 'sum'
+        }).reset_index()
+        region_sales.columns = ['Region', 'Total Sales', 'Total Units', 'Total Customers']
+        region_sales = region_sales.sort_values('Total Sales', ascending=False)
+        region_sales.to_excel(writer, sheet_name='By Region', index=False)
+        
+        # Sheet 4: Daily Sales Trends
+        daily_sales = filtered_df.groupby('Date').agg({
+            'Sales': 'sum',
+            'Units': 'sum',
+            'Customers': 'sum'
+        }).reset_index()
+        daily_sales.columns = ['Date', 'Total Sales', 'Total Units', 'Total Customers']
+        daily_sales.to_excel(writer, sheet_name='Daily Trends', index=False)
+        
+        # Sheet 5: Raw Data
+        filtered_df.to_excel(writer, sheet_name='Raw Data', index=False)
+    
+    return output.getvalue()
+
+# Export buttons
+st.sidebar.download_button(
+    label="📥 Download Summary Report (Excel)",
+    data=create_summary_report(df, filtered_df),
+    file_name=f"sales_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx",
+    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    help="Download comprehensive Excel report with summary statistics and breakdowns"
+)
+
+st.sidebar.download_button(
+    label="📥 Download Filtered Data (CSV)",
+    data=filtered_df.to_csv(index=False).encode('utf-8'),
+    file_name=f"filtered_data_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
+    mime="text/csv",
+    help="Download filtered data as CSV"
+)
+
+st.sidebar.info("💡 **Chart Export:** Hover over any chart and click the camera icon to download it as PNG")
 
 # Key Metrics
 st.markdown("---")
@@ -155,34 +347,49 @@ with tab1:
     )
     fig_line.update_traces(line_color='#1f77b4', line_width=2)
     fig_line.update_layout(height=400)
-    st.plotly_chart(fig_line, use_container_width=True)
+    st.plotly_chart(fig_line, width='stretch')
     
     # Moving average
-    daily_sales['MA7'] = daily_sales['Sales'].rolling(window=7).mean()
+    if len(daily_sales) >= 7:
+        daily_sales['MA7'] = daily_sales['Sales'].rolling(window=7).mean()
+        
+        fig_ma = go.Figure()
+        fig_ma.add_trace(go.Scatter(
+            x=daily_sales['Date'],
+            y=daily_sales['Sales'],
+            mode='lines',
+            name='Daily Sales',
+            line=dict(color='lightgray', width=1)
+        ))
+        fig_ma.add_trace(go.Scatter(
+            x=daily_sales['Date'],
+            y=daily_sales['MA7'],
+            mode='lines',
+            name='7-Day Moving Average',
+            line=dict(color='#ff7f0e', width=3)
+        ))
+        fig_ma.update_layout(
+            title='Sales with 7-Day Moving Average',
+            xaxis_title='Date',
+            yaxis_title='Sales ($)',
+            template='plotly_white',
+            height=400
+        )
+        st.plotly_chart(fig_ma, width='stretch')
     
-    fig_ma = go.Figure()
-    fig_ma.add_trace(go.Scatter(
-        x=daily_sales['Date'],
-        y=daily_sales['Sales'],
-        mode='lines',
-        name='Daily Sales',
-        line=dict(color='lightgray', width=1)
-    ))
-    fig_ma.add_trace(go.Scatter(
-        x=daily_sales['Date'],
-        y=daily_sales['MA7'],
-        mode='lines',
-        name='7-Day Moving Average',
-        line=dict(color='#ff7f0e', width=3)
-    ))
-    fig_ma.update_layout(
-        title='Sales with 7-Day Moving Average',
-        xaxis_title='Date',
-        yaxis_title='Sales ($)',
-        template='plotly_white',
-        height=400
+    # Area chart
+    st.subheader("Sales Area Chart")
+    fig_area = px.area(
+        daily_sales,
+        x='Date',
+        y='Sales',
+        title='Sales Over Time (Area View)',
+        labels={'Sales': 'Total Sales ($)'},
+        template='plotly_white'
     )
-    st.plotly_chart(fig_ma, use_container_width=True)
+    fig_area.update_traces(fillcolor='rgba(31, 119, 180, 0.3)', line_color='#1f77b4')
+    fig_area.update_layout(height=400)
+    st.plotly_chart(fig_area, width='stretch')
 
 with tab2:
     st.subheader("Sales by Category")
@@ -205,7 +412,7 @@ with tab2:
             color_continuous_scale='Blues'
         )
         fig_bar.update_layout(height=400)
-        st.plotly_chart(fig_bar, use_container_width=True)
+        st.plotly_chart(fig_bar, width='stretch')
     
     with col2:
         # Pie chart
@@ -217,7 +424,7 @@ with tab2:
             template='plotly_white'
         )
         fig_pie.update_layout(height=400)
-        st.plotly_chart(fig_pie, use_container_width=True)
+        st.plotly_chart(fig_pie, width='stretch')
 
 with tab3:
     st.subheader("Sales by Region")
@@ -240,7 +447,7 @@ with tab3:
             color_continuous_scale='Greens'
         )
         fig_region.update_layout(height=400)
-        st.plotly_chart(fig_region, use_container_width=True)
+        st.plotly_chart(fig_region, width='stretch')
     
     with col2:
         # Category performance by region
@@ -257,7 +464,28 @@ with tab3:
             barmode='stack'
         )
         fig_stacked.update_layout(height=400)
-        st.plotly_chart(fig_stacked, use_container_width=True)
+        st.plotly_chart(fig_stacked, width='stretch')
+    
+    # Heatmap
+    st.subheader("Sales Heatmap: Category vs Region")
+    heatmap_data = filtered_df.pivot_table(
+        values='Sales',
+        index='Category',
+        columns='Region',
+        aggfunc='sum',
+        fill_value=0
+    )
+    
+    fig_heatmap = px.imshow(
+        heatmap_data,
+        labels=dict(x="Region", y="Category", color="Sales ($)"),
+        title="Sales Intensity by Category and Region",
+        template='plotly_white',
+        color_continuous_scale='YlOrRd',
+        aspect='auto'
+    )
+    fig_heatmap.update_layout(height=400)
+    st.plotly_chart(fig_heatmap, width='stretch')
 
 with tab4:
     st.subheader("Detailed Analysis")
@@ -281,23 +509,14 @@ with tab4:
         template='plotly_white'
     )
     fig_scatter.update_layout(height=500)
-    st.plotly_chart(fig_scatter, use_container_width=True)
+    st.plotly_chart(fig_scatter, width='stretch')
     
     # Data table
     st.subheader("Raw Data Preview")
     st.dataframe(
         filtered_df.sort_values('Date', ascending=False).head(100),
-        use_container_width=True,
+        width='stretch',
         hide_index=True
-    )
-    
-    # Download button
-    csv = filtered_df.to_csv(index=False).encode('utf-8')
-    st.download_button(
-        label="Download Filtered Data as CSV",
-        data=csv,
-        file_name="dashboard_data.csv",
-        mime="text/csv"
     )
 
 # Footer
