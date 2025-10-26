@@ -137,8 +137,11 @@ else:
         st.info("Please upload a file to continue")
         st.stop()
 
-# If no valid data, stop
+# If no valid data, stop (but clear dataset signature to force reset on next load)
 if df is None or len(df) == 0:
+    # Clear dataset signature so filters reset on next successful load
+    if 'dataset_signature' in st.session_state:
+        del st.session_state.dataset_signature
     st.warning("No data available. Please check your file or use sample data.")
     st.stop()
 
@@ -148,32 +151,95 @@ st.session_state.df = df
 # Sidebar filters
 st.sidebar.header("Filters")
 
-# Date range filter
+# Get current dataset characteristics
 min_date = df['Date'].min().date()
 max_date = df['Date'].max().date()
+available_categories = sorted(df['Category'].unique())
+available_regions = sorted(df['Region'].unique())
 
+# Create a signature for the current dataset
+current_dataset_signature = {
+    'source': data_source,
+    'categories': tuple(available_categories),
+    'regions': tuple(available_regions),
+    'date_range': (min_date, max_date)
+}
+
+# Check if dataset has changed (compare with stored signature)
+dataset_changed = False
+if 'dataset_signature' not in st.session_state:
+    dataset_changed = True
+elif st.session_state.dataset_signature != current_dataset_signature:
+    dataset_changed = True
+
+# Update signature only after confirming we have valid data
+st.session_state.dataset_signature = current_dataset_signature
+
+# Initialize or reset filters when dataset changes
+if dataset_changed or 'filter_date_range' not in st.session_state:
+    st.session_state.filter_date_range = (min_date, max_date)
+    st.session_state.filter_categories = available_categories
+    st.session_state.filter_regions = available_regions
+    
+    # Clear widget keys to prevent validation errors with stale values
+    if 'date_range_input' in st.session_state:
+        del st.session_state['date_range_input']
+    if 'categories_input' in st.session_state:
+        del st.session_state['categories_input']
+    if 'regions_input' in st.session_state:
+        del st.session_state['regions_input']
+
+# Validate and clean filter values to ensure they're valid for current dataset
+valid_categories = [cat for cat in st.session_state.filter_categories if cat in available_categories]
+valid_regions = [reg for reg in st.session_state.filter_regions if reg in available_regions]
+
+# If all filters were invalidated, reset to all available options
+if not valid_categories:
+    valid_categories = available_categories
+if not valid_regions:
+    valid_regions = available_regions
+
+# Update session state with validated values BEFORE rendering widgets
+st.session_state.filter_categories = valid_categories
+st.session_state.filter_regions = valid_regions
+
+# Validate date range
+try:
+    filter_start, filter_end = st.session_state.filter_date_range
+    if filter_start < min_date or filter_end > max_date:
+        st.session_state.filter_date_range = (min_date, max_date)
+except (ValueError, TypeError):
+    st.session_state.filter_date_range = (min_date, max_date)
+
+# Date range filter
 date_range = st.sidebar.date_input(
     "Date Range",
-    value=(min_date, max_date),
+    value=st.session_state.filter_date_range,
     min_value=min_date,
-    max_value=max_date
+    max_value=max_date,
+    key='date_range_input'
 )
 
 # Category filter
-available_categories = sorted(df['Category'].unique())
 categories = st.sidebar.multiselect(
     "Categories",
     options=available_categories,
-    default=available_categories
+    default=st.session_state.filter_categories,
+    key='categories_input'
 )
 
 # Region filter
-available_regions = sorted(df['Region'].unique())
 regions = st.sidebar.multiselect(
     "Regions",
     options=available_regions,
-    default=available_regions
+    default=st.session_state.filter_regions,
+    key='regions_input'
 )
+
+# Update session state with user selections
+st.session_state.filter_date_range = date_range
+st.session_state.filter_categories = categories
+st.session_state.filter_regions = regions
 
 # Filter data based on selections
 filtered_df = df.copy()
